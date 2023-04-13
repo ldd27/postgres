@@ -45,11 +45,22 @@ var typeAliasMap = map[string][]string{
 	"numeric":  {"decimal"},
 }
 
+type constraint struct {
+	Name           string
+	ConstraintName string
+	ColumnType     string
+}
+
+type attribute struct {
+	Name     string
+	DataType string
+}
+
 var (
-	tableConstraintsUniqueMap = map[interface{}]*sql.Rows{}
-	tableConstraintsMap       = map[interface{}]*sql.Rows{}
-	attributeMap              = map[interface{}]*sql.Rows{}
-	columnMap                 = map[interface{}]*sql.Rows{}
+	tableConstraintsUniqueMap = map[interface{}]map[string]int{}
+	tableConstraintsMap       = map[interface{}][]constraint{}
+	attributeMap              = map[interface{}][]attribute{}
+	columnMap                 = map[interface{}][]gorm.ColumnType{}
 )
 
 type Migrator struct {
@@ -422,58 +433,59 @@ func (m Migrator) ColumnTypes(value interface{}) (columnTypes []gorm.ColumnType,
 			currentSchema, table = m.CurrentSchema(stmt, stmt.Table)
 		)
 
-		columns, ok := columnMap[table]
+		var ok bool
+		columnTypes, ok = columnMap[table]
 		if !ok {
-			columns, err = m.DB.Raw(
+			columns, err := m.DB.Raw(
 				"SELECT c.column_name, c.is_nullable = 'YES', c.udt_name, c.character_maximum_length, c.numeric_precision, c.numeric_precision_radix, c.numeric_scale, c.datetime_precision, 8 * typlen, c.column_default, pd.description, c.identity_increment FROM information_schema.columns AS c JOIN pg_type AS pgt ON c.udt_name = pgt.typname LEFT JOIN pg_catalog.pg_description as pd ON pd.objsubid = c.ordinal_position AND pd.objoid = (SELECT oid FROM pg_catalog.pg_class WHERE relname = c.table_name AND relnamespace = (SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = c.table_schema)) where table_catalog = ? AND table_schema = ? AND table_name = ?",
 				currentDatabase, currentSchema, table).Rows()
 			if err != nil {
 				return err
 			}
-			columnMap[table] = columns
-		}
 
-		for columns.Next() {
-			var (
-				column = &migrator.ColumnType{
-					PrimaryKeyValue: sql.NullBool{Valid: true},
-					UniqueValue:     sql.NullBool{Valid: true},
+			for columns.Next() {
+				var (
+					column = &migrator.ColumnType{
+						PrimaryKeyValue: sql.NullBool{Valid: true},
+						UniqueValue:     sql.NullBool{Valid: true},
+					}
+					datetimePrecision sql.NullInt64
+					radixValue        sql.NullInt64
+					typeLenValue      sql.NullInt64
+					identityIncrement sql.NullString
+				)
+
+				err = columns.Scan(
+					&column.NameValue, &column.NullableValue, &column.DataTypeValue, &column.LengthValue, &column.DecimalSizeValue,
+					&radixValue, &column.ScaleValue, &datetimePrecision, &typeLenValue, &column.DefaultValueValue, &column.CommentValue, &identityIncrement,
+				)
+				if err != nil {
+					return err
 				}
-				datetimePrecision sql.NullInt64
-				radixValue        sql.NullInt64
-				typeLenValue      sql.NullInt64
-				identityIncrement sql.NullString
-			)
 
-			err = columns.Scan(
-				&column.NameValue, &column.NullableValue, &column.DataTypeValue, &column.LengthValue, &column.DecimalSizeValue,
-				&radixValue, &column.ScaleValue, &datetimePrecision, &typeLenValue, &column.DefaultValueValue, &column.CommentValue, &identityIncrement,
-			)
-			if err != nil {
-				return err
+				if typeLenValue.Valid && typeLenValue.Int64 > 0 {
+					column.LengthValue = typeLenValue
+				}
+
+				if (strings.HasPrefix(column.DefaultValueValue.String, "nextval('") &&
+					strings.HasSuffix(column.DefaultValueValue.String, "seq'::regclass)")) || (identityIncrement.Valid && identityIncrement.String != "") {
+					column.AutoIncrementValue = sql.NullBool{Bool: true, Valid: true}
+					column.DefaultValueValue = sql.NullString{}
+				}
+
+				if column.DefaultValueValue.Valid {
+					column.DefaultValueValue.String = regexp.MustCompile(`'?(.*)\b'?:+[\w\s]+$`).ReplaceAllString(column.DefaultValueValue.String, "$1")
+				}
+
+				if datetimePrecision.Valid {
+					column.DecimalSizeValue = datetimePrecision
+				}
+
+				columnTypes = append(columnTypes, column)
 			}
-
-			if typeLenValue.Valid && typeLenValue.Int64 > 0 {
-				column.LengthValue = typeLenValue
-			}
-
-			if (strings.HasPrefix(column.DefaultValueValue.String, "nextval('") &&
-				strings.HasSuffix(column.DefaultValueValue.String, "seq'::regclass)")) || (identityIncrement.Valid && identityIncrement.String != "") {
-				column.AutoIncrementValue = sql.NullBool{Bool: true, Valid: true}
-				column.DefaultValueValue = sql.NullString{}
-			}
-
-			if column.DefaultValueValue.Valid {
-				column.DefaultValueValue.String = regexp.MustCompile(`'?(.*)\b'?:+[\w\s]+$`).ReplaceAllString(column.DefaultValueValue.String, "$1")
-			}
-
-			if datetimePrecision.Valid {
-				column.DecimalSizeValue = datetimePrecision
-			}
-
-			columnTypes = append(columnTypes, column)
+			columns.Close()
+			columnMap[table] = columnTypes
 		}
-		columns.Close()
 
 		// assign sql column type
 		{
@@ -498,42 +510,52 @@ func (m Migrator) ColumnTypes(value interface{}) (columnTypes []gorm.ColumnType,
 
 		// check primary, unique field
 		{
-			columnTypeRows, ok := tableConstraintsUniqueMap[table]
+			uniqueContraints, ok := tableConstraintsUniqueMap[table]
 			if !ok {
-				columnTypeRows, err = m.DB.Raw("SELECT constraint_name FROM information_schema.table_constraints tc JOIN information_schema.constraint_column_usage AS ccu USING (constraint_schema, constraint_name) JOIN information_schema.columns AS c ON c.table_schema = tc.constraint_schema AND tc.table_name = c.table_name AND ccu.column_name = c.column_name WHERE constraint_type IN ('PRIMARY KEY', 'UNIQUE') AND c.table_catalog = ? AND c.table_schema = ? AND c.table_name = ? AND constraint_type = ?", currentDatabase, currentSchema, table, "UNIQUE").Rows()
+				columnTypeRows, err := m.DB.Raw("SELECT constraint_name FROM information_schema.table_constraints tc JOIN information_schema.constraint_column_usage AS ccu USING (constraint_schema, constraint_name) JOIN information_schema.columns AS c ON c.table_schema = tc.constraint_schema AND tc.table_name = c.table_name AND ccu.column_name = c.column_name WHERE constraint_type IN ('PRIMARY KEY', 'UNIQUE') AND c.table_catalog = ? AND c.table_schema = ? AND c.table_name = ? AND constraint_type = ?", currentDatabase, currentSchema, table, "UNIQUE").Rows()
 				if err != nil {
 					return err
 				}
-				tableConstraintsUniqueMap[table] = columnTypeRows
+
+				uniqueContraints = map[string]int{}
+				for columnTypeRows.Next() {
+					var constraintName string
+					columnTypeRows.Scan(&constraintName)
+					uniqueContraints[constraintName]++
+				}
+				columnTypeRows.Close()
+				tableConstraintsUniqueMap[table] = uniqueContraints
 			}
 
-			uniqueContraints := map[string]int{}
-			for columnTypeRows.Next() {
-				var constraintName string
-				columnTypeRows.Scan(&constraintName)
-				uniqueContraints[constraintName]++
-			}
-			columnTypeRows.Close()
-
-			columnTypeRows, ok = tableConstraintsMap[table]
+			constraints, ok := tableConstraintsMap[table]
 			if !ok {
-				columnTypeRows, err = m.DB.Raw("SELECT c.column_name, constraint_name, constraint_type FROM information_schema.table_constraints tc JOIN information_schema.constraint_column_usage AS ccu USING (constraint_schema, constraint_name) JOIN information_schema.columns AS c ON c.table_schema = tc.constraint_schema AND tc.table_name = c.table_name AND ccu.column_name = c.column_name WHERE constraint_type IN ('PRIMARY KEY', 'UNIQUE') AND c.table_catalog = ? AND c.table_schema = ? AND c.table_name = ?", currentDatabase, currentSchema, table).Rows()
+				columnTypeRows, err := m.DB.Raw("SELECT c.column_name, constraint_name, constraint_type FROM information_schema.table_constraints tc JOIN information_schema.constraint_column_usage AS ccu USING (constraint_schema, constraint_name) JOIN information_schema.columns AS c ON c.table_schema = tc.constraint_schema AND tc.table_name = c.table_name AND ccu.column_name = c.column_name WHERE constraint_type IN ('PRIMARY KEY', 'UNIQUE') AND c.table_catalog = ? AND c.table_schema = ? AND c.table_name = ?", currentDatabase, currentSchema, table).Rows()
 				if err != nil {
 					return err
 				}
-				tableConstraintsMap[table] = columnTypeRows
+
+				constraints = make([]constraint, 0)
+				for columnTypeRows.Next() {
+					var name, constraintName, columnType string
+					columnTypeRows.Scan(&name, &constraintName, &columnType)
+					constraints = append(constraints, constraint{
+						Name:           name,
+						ConstraintName: constraintName,
+						ColumnType:     columnType,
+					})
+				}
+				columnTypeRows.Close()
+				tableConstraintsMap[table] = constraints
 			}
-			for columnTypeRows.Next() {
-				var name, constraintName, columnType string
-				columnTypeRows.Scan(&name, &constraintName, &columnType)
+			for _, v := range constraints {
 				for _, c := range columnTypes {
 					mc := c.(*migrator.ColumnType)
-					if mc.NameValue.String == name {
-						switch columnType {
+					if mc.NameValue.String == v.Name {
+						switch v.ColumnType {
 						case "PRIMARY KEY":
 							mc.PrimaryKeyValue = sql.NullBool{Bool: true, Valid: true}
 						case "UNIQUE":
-							if uniqueContraints[constraintName] == 1 {
+							if uniqueContraints[v.ConstraintName] == 1 {
 								mc.UniqueValue = sql.NullBool{Bool: true, Valid: true}
 							}
 						}
@@ -541,14 +563,13 @@ func (m Migrator) ColumnTypes(value interface{}) (columnTypes []gorm.ColumnType,
 					}
 				}
 			}
-			columnTypeRows.Close()
 		}
 
 		// check column type
 		{
-			dataTypeRows, ok := attributeMap[table]
+			attributes, ok := attributeMap[table]
 			if !ok {
-				dataTypeRows, err = m.DB.Raw(`SELECT a.attname as column_name, format_type(a.atttypid, a.atttypmod) AS data_type
+				dataTypeRows, err := m.DB.Raw(`SELECT a.attname as column_name, format_type(a.atttypid, a.atttypmod) AS data_type
 		FROM pg_attribute a JOIN pg_class b ON a.attrelid = b.oid AND relnamespace = (SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = ?)
 		WHERE a.attnum > 0 -- hide internal columns
 		AND NOT a.attisdropped -- hide deleted columns
@@ -556,27 +577,34 @@ func (m Migrator) ColumnTypes(value interface{}) (columnTypes []gorm.ColumnType,
 				if err != nil {
 					return err
 				}
-				attributeMap[table] = dataTypeRows
-			}
 
-			for dataTypeRows.Next() {
-				var name, dataType string
-				dataTypeRows.Scan(&name, &dataType)
+				attributes = make([]attribute, 0)
+				for dataTypeRows.Next() {
+					var name, dataType string
+					dataTypeRows.Scan(&name, &dataType)
+					attributes = append(attributes, attribute{
+						Name:     name,
+						DataType: dataType,
+					})
+				}
+				dataTypeRows.Close()
+				attributeMap[table] = attributes
+			}
+			for _, v := range attributes {
 				for _, c := range columnTypes {
 					mc := c.(*migrator.ColumnType)
-					if mc.NameValue.String == name {
-						mc.ColumnTypeValue = sql.NullString{String: dataType, Valid: true}
+					if mc.NameValue.String == v.Name {
+						mc.ColumnTypeValue = sql.NullString{String: v.DataType, Valid: true}
 						// Handle array type: _text -> text[] , _int4 -> integer[]
 						// Not support array size limits and array size limits because:
 						// https://www.postgresql.org/docs/current/arrays.html#ARRAYS-DECLARATION
 						if strings.HasPrefix(mc.DataTypeValue.String, "_") {
-							mc.DataTypeValue = sql.NullString{String: dataType, Valid: true}
+							mc.DataTypeValue = sql.NullString{String: v.DataType, Valid: true}
 						}
 						break
 					}
 				}
 			}
-			dataTypeRows.Close()
 		}
 
 		return err
@@ -785,8 +813,8 @@ func (m Migrator) RenameColumn(dst interface{}, oldName, field string) error {
 }
 
 func ClearCache() {
-	tableConstraintsMap = map[interface{}]*sql.Rows{}
-	tableConstraintsUniqueMap = map[interface{}]*sql.Rows{}
-	attributeMap = map[interface{}]*sql.Rows{}
-	columnMap = map[interface{}]*sql.Rows{}
+	tableConstraintsMap = map[interface{}][]Constraints{}
+	tableConstraintsUniqueMap = map[interface{}]map[string]int{}
+	attributeMap = map[interface{}][]Attribute{}
+	columnMap = map[interface{}][]gorm.ColumnType{}
 }
