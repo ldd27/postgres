@@ -46,9 +46,10 @@ var typeAliasMap = map[string][]string{
 }
 
 var (
-	TableConstraintsUniqueMap = map[interface{}]*sql.Rows{}
-	TableConstraintsMap       = map[interface{}]*sql.Rows{}
-	AttributeMap              = map[interface{}]*sql.Rows{}
+	tableConstraintsUniqueMap = map[interface{}]*sql.Rows{}
+	tableConstraintsMap       = map[interface{}]*sql.Rows{}
+	attributeMap              = map[interface{}]*sql.Rows{}
+	columnMap                 = map[interface{}]*sql.Rows{}
 )
 
 type Migrator struct {
@@ -419,13 +420,17 @@ func (m Migrator) ColumnTypes(value interface{}) (columnTypes []gorm.ColumnType,
 		var (
 			currentDatabase      = m.DB.Migrator().CurrentDatabase()
 			currentSchema, table = m.CurrentSchema(stmt, stmt.Table)
-			columns, err         = m.DB.Raw(
-				"SELECT c.column_name, c.is_nullable = 'YES', c.udt_name, c.character_maximum_length, c.numeric_precision, c.numeric_precision_radix, c.numeric_scale, c.datetime_precision, 8 * typlen, c.column_default, pd.description, c.identity_increment FROM information_schema.columns AS c JOIN pg_type AS pgt ON c.udt_name = pgt.typname LEFT JOIN pg_catalog.pg_description as pd ON pd.objsubid = c.ordinal_position AND pd.objoid = (SELECT oid FROM pg_catalog.pg_class WHERE relname = c.table_name AND relnamespace = (SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = c.table_schema)) where table_catalog = ? AND table_schema = ? AND table_name = ?",
-				currentDatabase, currentSchema, table).Rows()
 		)
 
-		if err != nil {
-			return err
+		columns, ok := columnMap[table]
+		if !ok {
+			columns, err = m.DB.Raw(
+				"SELECT c.column_name, c.is_nullable = 'YES', c.udt_name, c.character_maximum_length, c.numeric_precision, c.numeric_precision_radix, c.numeric_scale, c.datetime_precision, 8 * typlen, c.column_default, pd.description, c.identity_increment FROM information_schema.columns AS c JOIN pg_type AS pgt ON c.udt_name = pgt.typname LEFT JOIN pg_catalog.pg_description as pd ON pd.objsubid = c.ordinal_position AND pd.objoid = (SELECT oid FROM pg_catalog.pg_class WHERE relname = c.table_name AND relnamespace = (SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = c.table_schema)) where table_catalog = ? AND table_schema = ? AND table_name = ?",
+				currentDatabase, currentSchema, table).Rows()
+			if err != nil {
+				return err
+			}
+			columnMap[table] = columns
 		}
 
 		for columns.Next() {
@@ -493,13 +498,13 @@ func (m Migrator) ColumnTypes(value interface{}) (columnTypes []gorm.ColumnType,
 
 		// check primary, unique field
 		{
-			columnTypeRows, ok := TableConstraintsUniqueMap[table]
+			columnTypeRows, ok := tableConstraintsUniqueMap[table]
 			if !ok {
 				columnTypeRows, err = m.DB.Raw("SELECT constraint_name FROM information_schema.table_constraints tc JOIN information_schema.constraint_column_usage AS ccu USING (constraint_schema, constraint_name) JOIN information_schema.columns AS c ON c.table_schema = tc.constraint_schema AND tc.table_name = c.table_name AND ccu.column_name = c.column_name WHERE constraint_type IN ('PRIMARY KEY', 'UNIQUE') AND c.table_catalog = ? AND c.table_schema = ? AND c.table_name = ? AND constraint_type = ?", currentDatabase, currentSchema, table, "UNIQUE").Rows()
 				if err != nil {
 					return err
 				}
-				TableConstraintsUniqueMap[table] = columnTypeRows
+				tableConstraintsUniqueMap[table] = columnTypeRows
 			}
 
 			uniqueContraints := map[string]int{}
@@ -510,13 +515,13 @@ func (m Migrator) ColumnTypes(value interface{}) (columnTypes []gorm.ColumnType,
 			}
 			columnTypeRows.Close()
 
-			columnTypeRows, ok = TableConstraintsMap[table]
+			columnTypeRows, ok = tableConstraintsMap[table]
 			if !ok {
 				columnTypeRows, err = m.DB.Raw("SELECT c.column_name, constraint_name, constraint_type FROM information_schema.table_constraints tc JOIN information_schema.constraint_column_usage AS ccu USING (constraint_schema, constraint_name) JOIN information_schema.columns AS c ON c.table_schema = tc.constraint_schema AND tc.table_name = c.table_name AND ccu.column_name = c.column_name WHERE constraint_type IN ('PRIMARY KEY', 'UNIQUE') AND c.table_catalog = ? AND c.table_schema = ? AND c.table_name = ?", currentDatabase, currentSchema, table).Rows()
 				if err != nil {
 					return err
 				}
-				TableConstraintsMap[table] = columnTypeRows
+				tableConstraintsMap[table] = columnTypeRows
 			}
 			for columnTypeRows.Next() {
 				var name, constraintName, columnType string
@@ -541,7 +546,7 @@ func (m Migrator) ColumnTypes(value interface{}) (columnTypes []gorm.ColumnType,
 
 		// check column type
 		{
-			dataTypeRows, ok := AttributeMap[table]
+			dataTypeRows, ok := attributeMap[table]
 			if !ok {
 				dataTypeRows, err = m.DB.Raw(`SELECT a.attname as column_name, format_type(a.atttypid, a.atttypmod) AS data_type
 		FROM pg_attribute a JOIN pg_class b ON a.attrelid = b.oid AND relnamespace = (SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = ?)
@@ -551,7 +556,7 @@ func (m Migrator) ColumnTypes(value interface{}) (columnTypes []gorm.ColumnType,
 				if err != nil {
 					return err
 				}
-				AttributeMap[table] = dataTypeRows
+				attributeMap[table] = dataTypeRows
 			}
 
 			for dataTypeRows.Next() {
@@ -780,7 +785,8 @@ func (m Migrator) RenameColumn(dst interface{}, oldName, field string) error {
 }
 
 func ClearCache() {
-	TableConstraintsMap = map[interface{}]*sql.Rows{}
-	TableConstraintsUniqueMap = map[interface{}]*sql.Rows{}
-	AttributeMap = map[interface{}]*sql.Rows{}
+	tableConstraintsMap = map[interface{}]*sql.Rows{}
+	tableConstraintsUniqueMap = map[interface{}]*sql.Rows{}
+	attributeMap = map[interface{}]*sql.Rows{}
+	columnMap = map[interface{}]*sql.Rows{}
 }
