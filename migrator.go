@@ -242,28 +242,30 @@ func (m Migrator) MigrateColumn(value interface{}, field *schema.Field, columnTy
 		}
 	}
 
-	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
-		var description string
-		currentSchema, curTable := m.CurrentSchema(stmt, stmt.Table)
-		values := []interface{}{currentSchema, curTable, field.DBName, stmt.Table, currentSchema}
-		checkSQL := "SELECT description FROM pg_catalog.pg_description "
-		checkSQL += "WHERE objsubid = (SELECT ordinal_position FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND column_name = ?) "
-		checkSQL += "AND objoid = (SELECT oid FROM pg_catalog.pg_class WHERE relname = ? AND relnamespace = "
-		checkSQL += "(SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = ?))"
-		m.DB.Raw(checkSQL, values...).Scan(&description)
-
-		comment := strings.Trim(field.Comment, "'")
-		comment = strings.Trim(comment, `"`)
-		if field.Comment != "" && comment != description {
-			if err := m.DB.Exec(
-				"COMMENT ON COLUMN ?.? IS ?",
-				m.CurrentTable(stmt), clause.Column{Name: field.DBName}, gorm.Expr(m.Migrator.Dialector.Explain("$1", field.Comment)),
-			).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	return nil
+	// 删除comment迁移，以提升迁移性能
+	//return m.RunWithValue(value, func(stmt *gorm.Statement) error {
+	//	var description string
+	//	currentSchema, curTable := m.CurrentSchema(stmt, stmt.Table)
+	//	values := []interface{}{currentSchema, curTable, field.DBName, stmt.Table, currentSchema}
+	//	checkSQL := "SELECT description FROM pg_catalog.pg_description "
+	//	checkSQL += "WHERE objsubid = (SELECT ordinal_position FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND column_name = ?) "
+	//	checkSQL += "AND objoid = (SELECT oid FROM pg_catalog.pg_class WHERE relname = ? AND relnamespace = "
+	//	checkSQL += "(SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = ?))"
+	//	m.DB.Raw(checkSQL, values...).Scan(&description)
+	//
+	//	comment := strings.Trim(field.Comment, "'")
+	//	comment = strings.Trim(comment, `"`)
+	//	if field.Comment != "" && comment != description {
+	//		if err := m.DB.Exec(
+	//			"COMMENT ON COLUMN ?.? IS ?",
+	//			m.CurrentTable(stmt), clause.Column{Name: field.DBName}, gorm.Expr(m.Migrator.Dialector.Explain("$1", field.Comment)),
+	//		).Error; err != nil {
+	//			return err
+	//		}
+	//	}
+	//	return nil
+	//})
 }
 
 // AlterColumn alter value's `field` column' type based on schema definition
