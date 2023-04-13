@@ -499,6 +499,7 @@ func (m Migrator) ColumnTypes(value interface{}) (columnTypes []gorm.ColumnType,
 				if err != nil {
 					return err
 				}
+				TableConstraintsUniqueMap[table] = columnTypeRows
 			}
 
 			uniqueContraints := map[string]int{}
@@ -515,6 +516,7 @@ func (m Migrator) ColumnTypes(value interface{}) (columnTypes []gorm.ColumnType,
 				if err != nil {
 					return err
 				}
+				TableConstraintsMap[table] = columnTypeRows
 			}
 			for columnTypeRows.Next() {
 				var name, constraintName, columnType string
@@ -549,6 +551,7 @@ func (m Migrator) ColumnTypes(value interface{}) (columnTypes []gorm.ColumnType,
 				if err != nil {
 					return err
 				}
+				AttributeMap[table] = dataTypeRows
 			}
 
 			for dataTypeRows.Next() {
