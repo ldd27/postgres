@@ -813,8 +813,8 @@ func (m Migrator) RenameColumn(dst interface{}, oldName, field string) error {
 }
 
 func ClearCache() {
-	tableConstraintsMap = map[interface{}][]Constraints{}
+	tableConstraintsMap = map[interface{}][]constraints{}
 	tableConstraintsUniqueMap = map[interface{}]map[string]int{}
-	attributeMap = map[interface{}][]Attribute{}
+	attributeMap = map[interface{}][]attribute{}
 	columnMap = map[interface{}][]gorm.ColumnType{}
 }
